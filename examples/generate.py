@@ -1,5 +1,6 @@
-import docgen
 import json
+
+import docgen
 
 doc = {
     "doc_type": "memo",
@@ -11,11 +12,11 @@ doc = {
             "body": [
                 {"type": "text", "text": "This is a test paragraph.", "bold": True},
                 {"type": "pagebreak"},
-                {"type": "text", "text": "Second page."}
+                {"type": "text", "text": "Second page."},
             ],
-            "subsections": []
+            "subsections": [],
         }
-    ]
+    ],
 }
 
 docx_bytes = docgen.generate_docx_from_json(json.dumps(doc))

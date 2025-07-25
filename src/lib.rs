@@ -1,41 +1,28 @@
 use docx_rs::*;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use pulldown_cmark::{Parser, Event, Tag};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Cursor;
+use genpdf::Element;
 
 // ---------- SCHEMA ----------
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "type")]
 pub enum BodyElement {
-    #[serde(rename = "text")]
     TextSpan(TextSpan),
-    #[serde(rename = "pagebreak")]
     PageBreak(PageBreak),
-    #[serde(rename = "image")]
-    Image(Image),
-    #[serde(rename = "list")]
     List(ListElement),
-    #[serde(rename = "table")]
-    Table(TableElement),
-    #[serde(rename = "footnote")]
-    FootnoteRef(FootnoteRef),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TextSpan {
     pub text: String,
-    #[serde(default)]
     pub bold: bool,
-    #[serde(default)]
     pub italic: bool,
-    #[serde(default)]
     pub underline: bool,
-    #[serde(default)]
     pub font: Option<String>,
-    #[serde(default)]
     pub href: Option<String>,
 }
 
@@ -43,89 +30,166 @@ pub struct TextSpan {
 pub struct PageBreak {}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Image {
-    pub src: String,
-    #[serde(default)]
-    pub alt: Option<String>,
-    #[serde(default)]
-    pub caption: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ListElement {
-    #[serde(default)]
     pub ordered: bool,
     pub items: Vec<Vec<BodyElement>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct TableElement {
-    #[serde(default)]
-    pub headers: Option<Vec<String>>,
-    pub rows: Vec<Vec<BodyElement>>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct FootnoteRef {
-    pub ref_id: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Section {
-    #[serde(default)]
     pub heading: Option<String>,
-    #[serde(default)]
     pub body: Vec<BodyElement>,
-    #[serde(default)]
     pub subsections: Vec<Section>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Attachment {
-    pub filename: String,
-    #[serde(default)]
-    pub description: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Signature {
-    pub signer: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub date: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Footnote {
-    pub id: String,
-    pub content: Vec<BodyElement>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Document {
     pub doc_type: String,
     pub title: String,
-    #[serde(default)]
     pub date: Option<String>,
-    #[serde(default)]
     pub author: Option<String>,
-    #[serde(default, rename = "from")]
     pub from_: Option<String>,
-    #[serde(default)]
     pub to: Option<String>,
-    #[serde(default)]
     pub subject: Option<String>,
     pub sections: Vec<Section>,
-    #[serde(default)]
-    pub attachments: Option<Vec<Attachment>>,
-    #[serde(default)]
-    pub signatures: Option<Vec<Signature>>,
-    #[serde(default)]
-    pub footnotes: Option<Vec<Footnote>>,
-    #[serde(default)]
+    pub attachments: Option<Vec<()>>,
+    pub signatures: Option<Vec<()>>,
+    pub footnotes: Option<Vec<()>>,
     pub metadata: Option<HashMap<String, serde_json::Value>>,
 }
+
+// ---------- MARKDOWN PARSING ----------
+
+fn markdown_to_document(md: &str, title: &str) -> Document {
+    let parser = Parser::new(md);
+
+    let mut sections = Vec::new();
+    let mut current_section: Option<Section> = None;
+    let mut current_body: Vec<BodyElement> = Vec::new();
+    let mut in_list = false;
+    let mut list_items: Vec<Vec<BodyElement>> = Vec::new();
+    let mut list_ordered = false;
+    let mut text_style = (false, false, false); // bold, italic, underline
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Heading(_level, ..)) => {
+                if let Some(section) = current_section.take() {
+                    sections.push(section);
+                }
+                current_body = Vec::new();
+            }
+            Event::End(Tag::Heading(_level, ..)) => {
+                if let Some(heading_text) = current_body.iter().filter_map(|e| {
+                    if let BodyElement::TextSpan(t) = e {
+                        Some(t.text.clone())
+                    } else {
+                        None
+                    }
+                }).next() {
+                    current_section = Some(Section {
+                        heading: Some(heading_text),
+                        body: Vec::new(),
+                        subsections: Vec::new(),
+                    });
+                }
+                current_body = Vec::new();
+            }
+            Event::Start(Tag::List(Some(1))) => {
+                in_list = true;
+                list_ordered = true;
+                list_items = Vec::new();
+            }
+            Event::Start(Tag::List(None)) => {
+                in_list = true;
+                list_ordered = false;
+                list_items = Vec::new();
+            }
+            Event::End(Tag::List(_)) => {
+                current_body.push(BodyElement::List(ListElement {
+                    ordered: list_ordered,
+                    items: list_items.clone(),
+                }));
+                in_list = false;
+            }
+            Event::Start(Tag::Item) => {
+                list_items.push(Vec::new());
+            }
+            Event::End(Tag::Item) => {}
+            Event::Text(text) => {
+                if in_list {
+                    if let Some(last) = list_items.last_mut() {
+                        last.push(BodyElement::TextSpan(TextSpan {
+                            text: text.to_string(),
+                            bold: false,
+                            italic: false,
+                            underline: false,
+                            font: None,
+                            href: None,
+                        }));
+                    }
+                } else {
+                    let trimmed = text.trim();
+                    if trimmed == "[[PAGEBREAK]]" {
+                        current_body.push(BodyElement::PageBreak(PageBreak {}));
+                    } else {
+                        current_body.push(BodyElement::TextSpan(TextSpan {
+                            text: text.to_string(),
+                            bold: text_style.0,
+                            italic: text_style.1,
+                            underline: text_style.2,
+                            font: None,
+                            href: None,
+                        }));
+                    }
+                }
+            }
+            Event::Start(Tag::Emphasis) => { text_style.1 = true; }
+            Event::End(Tag::Emphasis) => { text_style.1 = false; }
+            Event::Start(Tag::Strong) => { text_style.0 = true; }
+            Event::End(Tag::Strong) => { text_style.0 = false; }
+            Event::SoftBreak | Event::HardBreak => {
+                current_body.push(BodyElement::TextSpan(TextSpan {
+                    text: "\n".to_string(),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    font: None,
+                    href: None,
+                }));
+            }
+            Event::End(Tag::Paragraph) => {}
+            _ => {}
+        }
+    }
+
+    if let Some(section) = current_section.take() {
+        sections.push(section);
+    }
+    if sections.is_empty() && !current_body.is_empty() {
+        sections.push(Section {
+            heading: None,
+            body: current_body.clone(),
+            subsections: vec![],
+        });
+    }
+
+    Document {
+        doc_type: "testdoc".to_string(),
+        title: title.to_string(),
+        date: None,
+        author: None,
+        from_: None,
+        to: None,
+        subject: None,
+        sections,
+        attachments: None,
+        signatures: None,
+        footnotes: None,
+        metadata: None,
+    }
+}
+
 
 // ---------- DOCX GENERATION ----------
 
@@ -143,11 +207,6 @@ fn add_body_to_doc(mut doc: Docx, body: &[BodyElement]) -> Docx {
             BodyElement::PageBreak(_) => {
                 doc.add_paragraph(Paragraph::new().page_break_before(true))
             }
-            BodyElement::Image(img) => {
-                let caption = img.caption.clone().unwrap_or_default();
-                let text = format!("[Image: {}] {}", img.src, caption);
-                doc.add_paragraph(Paragraph::new().add_run(Run::new().add_text(&text)))
-            }
             BodyElement::List(list) => {
                 let mut d = doc;
                 for item in &list.items {
@@ -164,43 +223,11 @@ fn add_body_to_doc(mut doc: Docx, body: &[BodyElement]) -> Docx {
                 }
                 d
             }
-            BodyElement::Table(table) => {
-                let mut tbl = Table::new(vec![]);
-                if let Some(headers) = &table.headers {
-                    let head_row = TableRow::new(
-                        headers.iter()
-                            .map(|h| TableCell::new()
-                                .add_paragraph(Paragraph::new()
-                                    .add_run(Run::new().add_text(h))))
-                            .collect()
-                    );
-                    tbl = tbl.add_row(head_row);
-                }
-                for row in &table.rows {
-                    let row_cells = row.iter().map(|cell| {
-                        if let BodyElement::TextSpan(t) = cell {
-                            TableCell::new()
-                              .add_paragraph(Paragraph::new().add_run(Run::new().add_text(&t.text)))
-                        } else {
-                            TableCell::new()
-                              .add_paragraph(Paragraph::new().add_run(Run::new().add_text("[?]")))
-
-                        }
-                    }).collect();
-                    tbl = tbl.add_row(TableRow::new(row_cells));
-                }
-                doc.add_table(tbl)
-            }
-            BodyElement::FootnoteRef(_) => {
-                doc.add_paragraph(Paragraph::new().add_run(Run::new().add_text("[Footnote Ref]")))
-
-            }
         };
     }
     doc
 }
 
-/// Append a section (with optional heading and nested subsections).
 fn add_section(mut doc: Docx, section: &Section) -> Docx {
     if let Some(h) = &section.heading {
         doc = doc.add_paragraph(Paragraph::new()
@@ -214,7 +241,6 @@ fn add_section(mut doc: Docx, section: &Section) -> Docx {
     doc
 }
 
-/// The main entry: build the doc, serialize to bytes.
 fn document_to_docx_bytes(document: &Document)
   -> Result<Vec<u8>, Box<dyn std::error::Error>>
 {
@@ -245,21 +271,91 @@ fn document_to_docx_bytes(document: &Document)
     Ok(buf.into_inner())
 }
 
+
+// ---------- PDF GENERATION ----------
+
+fn document_to_pdf_bytes(document: &Document) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    use genpdf::{elements, Alignment};
+
+    let mut doc = genpdf::Document::new(genpdf::fonts::from_files(
+        "./fonts", // provide a fonts dir or use the default ones
+        "LiberationSans", // fallback
+        None,
+    )?);
+
+    doc.set_title(document.title.clone());
+
+    doc.push(elements::Paragraph::new(document.title.clone()).aligned(Alignment::Center).styled(genpdf::style::Style::new().bold().with_font_size(24)));
+    if let Some(a) = &document.author {
+        doc.push(elements::Paragraph::new(format!("Author: {}", a)).aligned(Alignment::Center));
+    }
+    if let Some(d) = &document.date {
+        doc.push(elements::Paragraph::new(format!("Date: {}", d)).aligned(Alignment::Center));
+    }
+    doc.push(elements::Break::new(1));
+
+    for section in &document.sections {
+        if let Some(h) = &section.heading {
+            let heading_style = genpdf::style::Style::new().bold().with_font_size(18);
+            doc.push(elements::Paragraph::new(h.clone()).styled(heading_style));
+        }
+        for elem in &section.body {
+            match elem {
+                BodyElement::TextSpan(t) => {
+                    let mut style = genpdf::style::Style::new();
+                    if t.bold { style = style.bold(); }
+                    if t.italic { style = style.italic(); }
+                    let p = elements::Paragraph::new(t.text.clone()).styled(style);
+                    doc.push(p);
+                }
+                BodyElement::PageBreak(_) => {
+                    doc.push(elements::PageBreak::new());
+                }
+                BodyElement::List(list) => {
+                    for (i, item) in list.items.iter().enumerate() {
+                        let bullet = if list.ordered { format!("{}. ", i + 1) } else { "- ".to_string() };
+                        let text: String = item.iter().filter_map(|e| {
+                            if let BodyElement::TextSpan(t) = e {
+                                Some(t.text.clone())
+                            } else {
+                                None
+                            }
+                        }).collect();
+                        doc.push(elements::Paragraph::new(format!("{}{}", bullet, text)));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut buf: Vec<u8> = Vec::new();
+    doc.render(&mut buf)?;
+    Ok(buf)
+}
+
 // ---------- PYTHON BINDING ----------
 
 #[pyfunction]
-fn generate_docx_from_json(py: Python, doc_json: &str) -> PyResult<PyObject> {
-    let document: Document = serde_json::from_str(doc_json)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-
+fn generate_docx_from_markdown(py: Python, markdown: &str, title: Option<&str>) -> PyResult<PyObject> {
+    let doc_title = title.unwrap_or("Document");
+    let document = markdown_to_document(markdown, doc_title);
     let docx_bytes = document_to_docx_bytes(&document)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
     Ok(PyBytes::new(py, &docx_bytes).into())
 }
 
+#[pyfunction]
+fn generate_pdf_from_markdown(py: Python, markdown: &str, title: Option<&str>) -> PyResult<PyObject> {
+    let doc_title = title.unwrap_or("Document");
+    let document = markdown_to_document(markdown, doc_title);
+    let pdf_bytes = document_to_pdf_bytes(&document)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Ok(PyBytes::new(py, &pdf_bytes).into())
+}
+
 #[pymodule]
-fn docgen(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(generate_docx_from_json, m)?)?;
+fn synthdoc(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(generate_docx_from_markdown, m)?)?;
+    m.add_function(wrap_pyfunction!(generate_pdf_from_markdown, m)?)?;
     Ok(())
 }

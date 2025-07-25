@@ -7,7 +7,9 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
+docx-rs = "0.4"
+pulldown-cmark = "0.9"
+pyo3 = { version = "0.20", features = ["extension-module"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-docx-rs = "0.4"
-pyo3 = { version = "0.21", features = ["extension-module"] }
+genpdf = "0.2.0"
