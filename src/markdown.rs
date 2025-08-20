@@ -224,7 +224,7 @@ pub fn markdown_to_document(md: &str) -> Result<Document> {
 
     // Collapse stack into root
     let mut root = Section { level: 0, ..Default::default() };
-    while let Some(mut s) = section_stack.pop() {
+    while let Some(s) = section_stack.pop() {
         if s.level == 0 {
             root = s;
             break;
